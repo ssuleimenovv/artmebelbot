@@ -17,9 +17,12 @@ TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')  # формат: wh
 
 app = Flask(__name__)
 
+# Путь к базе данных
+DB_PATH = '/app/bot_settings.db'
+
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
     # Таблица настроек
@@ -46,13 +49,14 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings VALUES ('work_end', '18:00')")
     c.execute("INSERT OR IGNORE INTO settings VALUES ('working_days', '1,2,3,4,5')")  # Пн-Пт
     c.execute("INSERT OR IGNORE INTO settings VALUES ('after_hours_msg', 'Мы вне рабочего времени. Ответим в рабочие часы.')")
+    c.execute("INSERT OR IGNORE INTO settings VALUES ('admin_chat_id', '')")  # Автоматически установится
     
     conn.commit()
     conn.close()
 
 # Функции работы с БД
 def get_setting(key):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT value FROM settings WHERE key=?", (key,))
     result = c.fetchone()
@@ -60,14 +64,14 @@ def get_setting(key):
     return result[0] if result else None
 
 def set_setting(key, value):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
 def add_auto_reply(keyword, response):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
         c.execute("INSERT INTO auto_replies VALUES (NULL, ?, ?)", (keyword.lower(), response))
@@ -79,7 +83,7 @@ def add_auto_reply(keyword, response):
         return False
 
 def get_auto_reply(message):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT response FROM auto_replies")
     replies = c.fetchall()
@@ -92,7 +96,7 @@ def get_auto_reply(message):
     return None
 
 def list_auto_replies():
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT keyword, response FROM auto_replies")
     replies = c.fetchall()
@@ -100,14 +104,14 @@ def list_auto_replies():
     return replies
 
 def delete_auto_reply(keyword):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM auto_replies WHERE keyword=?", (keyword.lower(),))
     conn.commit()
     conn.close()
 
 def save_message(phone, message):
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT INTO messages VALUES (NULL, ?, ?, ?)", 
               (phone, message, datetime.now().isoformat()))
@@ -115,7 +119,7 @@ def save_message(phone, message):
     conn.close()
 
 def get_stats():
-    conn = sqlite3.connect('bot_settings.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM messages")
     total = c.fetchone()[0]
@@ -140,14 +144,24 @@ def is_working_hours():
     return work_start <= current_time <= work_end
 
 # Отправка сообщения в Telegram
-def send_telegram_message(text):
+def send_telegram_message(text, chat_id=None):
+    if not chat_id:
+        # Используем сохранённый admin_chat_id или TELEGRAM_CHAT_ID из переменных окружения
+        chat_id = get_setting('admin_chat_id') or TELEGRAM_CHAT_ID
+    
+    if not chat_id:
+        return  # Нет ID для отправки
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML"
     }
-    requests.post(url, data=data)
+    try:
+        requests.post(url, data=data, timeout=5)
+    except:
+        pass  # Игнорируем ошибки отправки
 
 # Отправка WhatsApp сообщения
 def send_whatsapp_message(to_number, message):
@@ -204,11 +218,21 @@ def telegram_webhook():
         return '', 200
     
     message = update['message']
-    chat_id = message['chat']['id']
+    chat_id = str(message['chat']['id'])
     text = message.get('text', '')
     
-    # Проверка, что это сообщение от твоего брата
-    if str(chat_id) != TELEGRAM_CHAT_ID:
+    # Автоматическое определение админа при первом запуске
+    saved_chat_id = get_setting('admin_chat_id')
+    if not saved_chat_id and text.startswith('/start'):
+        set_setting('admin_chat_id', chat_id)
+        saved_chat_id = chat_id
+        send_telegram_message(f"✅ Админ установлен! Ваш Chat ID: {chat_id}")
+    
+    # Проверка, что это сообщение от админа
+    if TELEGRAM_CHAT_ID and str(chat_id) != TELEGRAM_CHAT_ID:
+        return '', 200
+    
+    if saved_chat_id and str(chat_id) != saved_chat_id:
         return '', 200
     
     # Обработка команд
@@ -328,7 +352,9 @@ def telegram_webhook():
 def home():
     return "WhatsApp Bot is running! 🤖"
 
+# Инициализация БД при запуске
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
